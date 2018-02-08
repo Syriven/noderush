@@ -3,16 +3,20 @@
 #include <vector>
 #include <math.h>
 #include <SFML/Graphics.hpp>
+#include <SFML/System/Time.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/weak_ptr.hpp>
 #include <boost/enable_shared_from_this.hpp>
 #include <boost/range/join.hpp>
+#include <boost/algorithm/algorithm.hpp>
 
 using namespace std;
 
 inline int round(double x) {
 	return floor(x + 0.5);
 }
+
+const sf::Time MAX_FRAME_TIME = sf::seconds(1.f / 60); // 60 FPS
 
 const int GRID_CELL_WIDTH = 16;
 
@@ -22,6 +26,7 @@ const int MODE_BUILD = 1;
 const int BUILDINGTYPE_NEXUS = 0;
 const int BUILDINGTYPE_NODE = 1;
 const int BUILDINGTYPE_GENERATOR = 2;
+const int BUILDINGTYPE_ENERGYCANNON = 3;
 
 const int NEXUS_MAXHEALTH = 2000;
 const int NEXUS_MASSCOST = 100000;
@@ -29,16 +34,28 @@ const float NEXUS_BUILD_MASSDRAW = 10;
 const float NEXUS_BUILD_ENERGYDRAW = 20;
 const float NEXUS_ENERGY_PROVIDED = 20;
 
-const int NODE_MAXHEALTH = 100;
+const int NODE_MAXHEALTH = 150;
 const float NODE_MASSCOST = 2000;
 const float NODE_BUILD_MASSDRAW = 10;
 const float NODE_BUILD_ENERGYDRAW = 3;
 
-const int GENERATOR_MAXHEALTH = 300;
+const int GENERATOR_MAXHEALTH = 500;
 const int GENERATOR_MASSCOST = 10000;
 const float GENERATOR_BUILD_MASSDRAW = 10;
 const float GENERATOR_BUILD_ENERGYDRAW = 10;
 const float GENERATOR_ENERGY_PROVIDED = 10;
+
+const int ENERGYCANNON_MAXHEALTH = 800;
+const float ENERGYCANNON_MASSCOST = 4000;
+const float ENERGYCANNON_BUILD_MASSDRAW = 10;
+const float ENERGYCANNON_BUILD_ENERGYDRAW = 20;
+const int ENERGYCANNON_ATTACKRANGE = 400;
+const float ENERGYCANNON_RECHARGE_ENERGYDRAW = 3;
+const int ENERGYCANNON_MAX_ENERGYCHARGE = 300;
+const float ENERGYCANNON_SHOT_ENERGYCOST = 300;
+
+const float ENERGYBULLET_SPEED = 1;
+const int ENERGYBULLET_DAMAGE = 50;
 
 const int NODE_CONNECTION_MAXLENGTH = 300;
 
@@ -91,6 +108,7 @@ protected:
 	bool active;
 	bool ghost;
 	bool built;
+	bool dead;
 public:
 	Building(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, int _width, bool _ghost) {
 		owner = _owner;
@@ -101,12 +119,13 @@ public:
 		health = 0;
 		active = false;
 		built = false;
+		dead = false;
 	}
 	void setOwner(boost::weak_ptr<Player> _owner) {
 		owner = _owner;
 	}
-	boost::weak_ptr<Player> getOwner() {
-		return owner;
+	boost::shared_ptr<Player> getOwner() {
+		return owner.lock();
 	}
 	void magicallyComplete() {
 		massBuilt = getBuildMassTarget();
@@ -163,7 +182,20 @@ public:
 	sf::Vector2f getPos() {
 		return getCenterPos();
 	}
+	bool collidesWithPoint(sf::Vector2f point) {
+		float left = getGridPoint().x * GRID_CELL_WIDTH;
+		float top = getGridPoint().y * GRID_CELL_WIDTH;
+		float right = left + (width * GRID_CELL_WIDTH);
+		float bottom = top + (width * GRID_CELL_WIDTH);
+
+		return (point.x > left && point.x < right && point.y > top && point.y < bottom);
+	}
 	virtual void go() {}
+	void takeDamage(int damage) {
+		health -= damage;
+		if (health <= 0)
+			die();
+	}
 	void drawBackground(sf::RenderWindow *window, sf::Color color) {
 		sf::Vertex backgroundQuad[] = {
 			sf::Vertex(toDrawPos(grid.getRealPos(gridPoint)), color),
@@ -209,10 +241,86 @@ public:
 	void drawGhost(sf::RenderWindow *window) {
 		draw(window, sf::Color(150,150,150,255));
 	}
+	void die() {
+		dead = true;
+	}
+	bool isDead() {
+		return dead;
+	}
 };
 
 vector<boost::shared_ptr<Building>> buildings;
 boost::shared_ptr<Building> cursorBuilding;
+
+class Mob {
+protected:
+	sf::Vector2f pos;
+	bool dead;
+	boost::weak_ptr<Player> owner;
+public:
+	Mob(sf::Vector2f _pos) {
+		dead = false;
+		pos = _pos;
+		owner.reset();
+	}
+	void setOwner(boost::shared_ptr<Player> _owner) {
+		owner = _owner;
+	}
+	boost::shared_ptr<Player> getOwner() {
+		return owner.lock();
+	}
+	sf::Vector2f getPos() {
+		return pos;
+	}
+	virtual void go() {}
+	virtual void draw(sf::RenderWindow *window) {}
+	void die() {
+		dead = true;
+	}
+	bool isDead() {
+		return dead;
+	}
+};
+
+vector<boost::shared_ptr<Mob>> mobs;
+
+class EnergyBullet : public Mob {
+	sf::Vector2f targetPos;
+public:
+	EnergyBullet(sf::Vector2f _pos, boost::shared_ptr<Player> _owner, sf::Vector2f _targetPos)
+	: Mob(_pos) {
+		targetPos = _targetPos;
+		setOwner(_owner);
+	}
+	void go() {
+		sf::Vector2f prevPos = pos;
+
+		float currentDistance = getMagnitude(pos - targetPos);
+		float distanceToTravel = min(currentDistance, ENERGYBULLET_SPEED);
+		sf::Vector2f unitDirVector = (targetPos - pos) * 1.f/currentDistance;
+		pos += unitDirVector * distanceToTravel;
+
+		for (int i=0; i<buildings.size(); i++) {
+			if (getOwner().get() == buildings[i]->getOwner().get())
+				continue;//No friendly fire!
+
+			if (buildings[i]->collidesWithPoint(pos)) {
+				buildings[i]->takeDamage(ENERGYBULLET_DAMAGE);
+				die();
+				break;
+			}
+		}
+
+		if (pos == prevPos)
+			die();
+	}
+	void draw(sf::RenderWindow *window) {
+		sf::CircleShape circle(2);
+		circle.setFillColor(sf::Color(255,0,0));
+		circle.setPosition(toDrawPos(getPos()));
+		window->draw(circle);
+	}
+};
 
 template <class BuildingClass>
 vector<boost::shared_ptr<BuildingClass>> findNearbyBuildings(vector<boost::shared_ptr<Building>> *buildingVector, sf::Vector2f pos, int maxRange, bool mustBeActive) {
@@ -330,6 +438,149 @@ public:
 	}
 };
 
+class AttackerBaseClass : public virtual Building {
+protected:
+	boost::weak_ptr<Building> target;
+	float chargedEnergy;
+public:
+	AttackerBaseClass(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, int _width, bool _ghost)
+		: Building(_owner, _gridPoint, _width, _ghost) {
+			chargedEnergy = 0;
+	}
+	void setTarget(boost::weak_ptr<Building> _target) {
+		target = _target;
+	}
+	boost::shared_ptr<Building> getTarget() {
+		return target.lock();
+	}
+	float getChargedEnergy() {return chargedEnergy;}
+	virtual int getAttackRange() {return 0;}
+	virtual float getMaxRechargeEnergyDraw() {return 0;}
+	virtual int getMaxEnergyCharge() {return 0;}
+	virtual float getWeaponShotEnergyCost() {return 0;}
+	float getRechargeEnergyDraw() {
+		float energyUncharged = getMaxEnergyCharge() - chargedEnergy;
+		if (energyUncharged <= 0)
+			return 0;
+		else {
+			return min(energyUncharged, getMaxRechargeEnergyDraw());
+		}
+	}
+	float supplyRechargeEnergy(float supplyRatio) {
+		float availableEnergy = getMaxRechargeEnergyDraw() * supplyRatio;
+		float energyUncharged = getMaxEnergyCharge() - chargedEnergy;
+		float addedEnergy = min(energyUncharged, availableEnergy);
+		chargedEnergy += addedEnergy;
+		return addedEnergy;
+	}
+	bool weaponIsReady() {
+		return (chargedEnergy >= getWeaponShotEnergyCost());
+	}
+	void dischargeWeapon() {
+		chargedEnergy -= getWeaponShotEnergyCost();
+	}
+	bool targetClosestEnemy() {
+		vector<boost::shared_ptr<Building>> nearbyBuildings = findNearbyBuildings<Building>(&buildings, getCenterPos(), getAttackRange(), false);
+
+		float closestTargetDistance;
+		boost::shared_ptr<Building> closestTarget;
+		for (int i=0; i<nearbyBuildings.size(); i++) {
+			//ignore if it's not an enemy building (also filters out the reference to itself that findNearbyBuildings will return
+			if (nearbyBuildings[i]->getOwner().get() == getOwner().get())
+				continue;
+
+			float distance = getMagnitude(this->getCenterPos() - nearbyBuildings[i]->getCenterPos());
+			if (closestTarget.get() == NULL || distance < closestTargetDistance) {
+				closestTarget = nearbyBuildings[i];
+				closestTargetDistance = distance;
+			}
+		}
+
+		if (closestTarget.get() != NULL) {
+			target = boost::weak_ptr<Building>(closestTarget);
+			return true;
+		}
+		else
+			return false;
+	}
+	void attackerGo() {
+		targetClosestEnemy();
+	}
+};
+
+class EnergyCannon : public AttackerBaseClass {
+public:
+	EnergyCannon(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, bool _ghost)
+		: AttackerBaseClass(_owner, _gridPoint, 2, _ghost),
+		  Building(_owner, _gridPoint, 2, _ghost)
+		{}
+	int getMaxHealth() {
+		return ENERGYCANNON_MAXHEALTH;
+	}
+	int getBuildMassTarget() {
+		return ENERGYCANNON_MASSCOST;
+	}
+	Resources getBuildResourceDraw() {
+		return Resources(ENERGYCANNON_BUILD_MASSDRAW, ENERGYCANNON_BUILD_ENERGYDRAW);
+	}
+	float getEnergyDraw() {
+		return getRechargeEnergyDraw();
+	}
+	float supplyEnergy(float supplyRatio) {
+		return supplyRechargeEnergy(supplyRatio);
+	}
+	int getAttackRange() {
+		return ENERGYCANNON_ATTACKRANGE;
+	}
+	float getMaxRechargeEnergyDraw() {
+		return ENERGYCANNON_RECHARGE_ENERGYDRAW;
+	}
+	int getMaxEnergyCharge() {
+		return ENERGYCANNON_MAX_ENERGYCHARGE;
+	}
+	float getWeaponShotEnergyCost() {
+		return ENERGYCANNON_SHOT_ENERGYCOST;
+	}
+	void go() {
+		attackerGo();
+
+		//Fire if we have a target
+		if (boost::shared_ptr<Building> targetPtr = target.lock()) {
+			if (weaponIsReady()) {
+				dischargeWeapon();
+
+				sf::Vector2f targetPos = target.lock()->getPos();
+				mobs.push_back(boost::shared_ptr<EnergyBullet>(new EnergyBullet(getPos(), getOwner(), targetPos)));
+			}
+		}
+	}
+	void drawDesign(sf::RenderWindow *window) {
+		if (isActive()) {
+			boost::shared_ptr<Building> possibleTarget = target.lock();
+
+			sf::Vertex aimer[2];
+				aimer[0] = sf::Vertex(toDrawPos(getCenterPos()), sf::Color(255,255,255,100));
+				if (possibleTarget.get() != NULL)
+					aimer[1] = sf::Vertex(toDrawPos(possibleTarget->getPos()), sf::Color(255,0,0,50));
+				else
+					aimer[1] = sf::Vertex(toDrawPos(getCenterPos() + sf::Vector2f(0, -5)), sf::Color(255,0,0,50));
+			window->draw(aimer, 2, sf::Lines);
+
+			sf::Text text;
+			text.setFont(font);
+			text.setCharacterSize(12);
+			text.setColor(sf::Color::Red);
+			text.setPosition(toDrawPos(getCenterPos()).x, toDrawPos(getCenterPos()).y-30);
+
+			stringstream s;
+			s << getChargedEnergy();
+
+			text.setString(s.str());
+			window->draw(text);
+		}
+	}
+};
+
 class Nexus : public NodeBaseClass, public EnergyProviderBaseClass {
 	int minerals;
 public:
@@ -372,7 +623,8 @@ class Network {
 	vector<boost::shared_ptr<NodeBaseClass>> activeNodes;
 	bool connectedToNexus;
 public:
-	float energyAvailable, energySpent, massAvailable, massSpent, energyProfit;
+	float energyAvailable, energyRequested, energySpent, energyProfit;
+	float massAvailable, massRequested, massSpent;
 	Network(boost::weak_ptr<Player> _owner, boost::shared_ptr<NodeBaseClass> _networkCenter) {
 		owner = _owner;
 		networkCenter = _networkCenter;
@@ -450,10 +702,12 @@ void Network::go() {
 		}
 	}
 
-	float energyRequested = 0;
-	float massRequested = 0;
+	energyRequested = 0;
+	massRequested = 0;
 	for (int i=0; i<connectedBuildings.size(); i++) {
-		energyRequested += connectedBuildings[i]->getEnergyDraw();
+		if (connectedBuildings[i]->isActive())
+			energyRequested += connectedBuildings[i]->getEnergyDraw();
+
 		if (networkCanBuild && !connectedBuildings[i]->isBuilt()) {
 			Resources r = connectedBuildings[i]->getBuildResourceDraw();
 			energyRequested += r.energy;
@@ -552,8 +806,8 @@ int buildType;
 
 boost::shared_ptr<Player> selectedPlayer;
 
-//sf::RenderWindow window(sf::VideoMode(1366, 768, 32), "Nodes", sf::Style::Fullscreen);
-sf::RenderWindow window(sf::VideoMode(1920, 1080, 32), "Nodes", sf::Style::Fullscreen);
+//sf::RenderWindow window(sf::VideoMode(1366, 768, 32), "noderush", sf::Style::Fullscreen);
+sf::RenderWindow window(sf::VideoMode(1920, 1080, 32), "noderush", sf::Style::Fullscreen);
 
 void start() {
 	for (int i=0; i<9; i++) {
@@ -595,6 +849,9 @@ void changeBuildType(int newBuildType) {
 	else if (newBuildType == BUILDINGTYPE_GENERATOR) {
 		cursorBuilding = boost::shared_ptr<Generator>(new Generator(boost::shared_ptr<Player>(), cursorBuilding->getGridPoint(), true));
 	}
+	else if (newBuildType == BUILDINGTYPE_ENERGYCANNON) {
+		cursorBuilding = boost::shared_ptr<EnergyCannon>(new EnergyCannon(boost::shared_ptr<Player>(), cursorBuilding->getGridPoint(), true));
+	}
 	else {
 		assert(false);
 	}
@@ -611,10 +868,15 @@ void createNewCursorBuilding() {
 	else if (buildType == BUILDINGTYPE_GENERATOR) {
 		cursorBuilding = boost::shared_ptr<Generator>(new Generator(boost::shared_ptr<Player>(), sf::Vector2i(0,0), true));
 	}
+	else if (buildType == BUILDINGTYPE_ENERGYCANNON) {
+		cursorBuilding = boost::shared_ptr<EnergyCannon>(new EnergyCannon(boost::shared_ptr<Player>(), sf::Vector2i(0,0), true));
+	}
 	else {
 		assert(false);
 	}
 }
+
+int frameNum(0);
 
 void go() {
 	if (mode == MODE_BUILD) {
@@ -631,7 +893,27 @@ void go() {
 			players[i]->networks[j]->go();
 		}
 	}
+
+	for (int i=0; i<mobs.size(); i++) {
+		mobs[i]->go();
+	}
+
+	//remove anything that's dead
+	for (int i=0; i<players.size(); i++) {
+		players[i]->ownedBuildings.erase(remove_if(players[i]->ownedBuildings.begin(), players[i]->ownedBuildings.end(),
+										 [](boost::shared_ptr<Building> b) {return b->isDead(); }),
+										 players[i]->ownedBuildings.end());
+	}
+	buildings.erase(remove_if(buildings.begin(), buildings.end(),
+					[](boost::shared_ptr<Building> b) {return b->isDead(); }),
+					buildings.end());
+	mobs.erase(remove_if(mobs.begin(), mobs.end(),
+			   [](boost::shared_ptr<Mob> m) {return m->isDead(); }),
+			   mobs.end());
+	frameNum++;
 }
+
+float framerate=0;
 
 void draw() {
 	//draw connections
@@ -646,6 +928,9 @@ void draw() {
 	for (int i=0; i<selectedPlayer->ghostBuildings.size(); i++) {
 		selectedPlayer->ghostBuildings[i]->draw(&window, sf::Color(170,170,170));
 	}
+	for (int i=0; i<mobs.size(); i++) {
+		mobs[i]->draw(&window);
+	}
 
 	if (mode == MODE_BUILD) {
 		cursorBuilding->draw(&window, sf::Color(100,100,100));
@@ -658,15 +943,21 @@ void draw() {
 	text.setColor(sf::Color::White);
 
 	stringstream s;
+
+	if (framerate < 20)
+		s << "frame " << framerate << endl << endl;
+	else
+		s << "frame " << ceil(framerate) << endl << endl;
+
 	for (int i=0; i<selectedPlayer->networks.size(); i++) {
 		s << "Network " << i << ":" << endl << endl;
 
 		s << "Energy available: " << selectedPlayer->networks[i]->energyAvailable << endl;
-		s << "Energy spent: " << selectedPlayer->networks[i]->energySpent << endl;
+		s << "Energy requested: " << selectedPlayer->networks[i]->energyRequested << endl;
 		s << "Energy profit: " << selectedPlayer->networks[i]->energyProfit << endl;
 
 		s << "Mass available: " << selectedPlayer->networks[i]->massAvailable << endl;
-		s << "Mass spent: " << selectedPlayer->networks[i]->massSpent << endl;
+		s << "Mass requested: " << selectedPlayer->networks[i]->massRequested << endl;
 
 		s << endl << endl;
 	}
@@ -679,6 +970,8 @@ void draw() {
 int main (int argc, char **argv) {
 	setup();
 	start();
+
+	sf::Clock frameClock;
 
     sf::Event e;
 
@@ -700,7 +993,13 @@ int main (int argc, char **argv) {
 					break;
 				case sf::Event::KeyPressed:
 					{
-						if (e.key.code == sf::Keyboard::Escape) {
+						if (e.key.code == sf::Keyboard::Tilde) {
+							int a=0; a++;
+						}
+						else if (e.key.code == sf::Keyboard::Slash) {
+							//buildings[0]->die();
+						}
+						else if (e.key.code == sf::Keyboard::Escape) {
 							if (mode == MODE_NULL) {
 								window.close();
 							}
@@ -719,6 +1018,10 @@ int main (int argc, char **argv) {
 						else if (e.key.code == sf::Keyboard::W) {
 							changeMode(MODE_BUILD);
 							changeBuildType(BUILDINGTYPE_GENERATOR);
+						}
+						else if (e.key.code == sf::Keyboard::R) {
+							changeMode(MODE_BUILD);
+							changeBuildType(BUILDINGTYPE_ENERGYCANNON);
 						}
 					}
 					break;
@@ -754,6 +1057,11 @@ int main (int argc, char **argv) {
 							registerNewGhostBuilding(selectedPlayer, cursorBuilding);
 							createNewCursorBuilding();
 						}
+						else if (e.mouseButton.button == sf::Mouse::Middle) {
+							sf::Vector2f pos(e.mouseButton.x, e.mouseButton.y);
+
+							//mobs.push_back(boost::shared_ptr<EnergyBullet>(new EnergyBullet(bulletPos, players[0], sf::Vector2f(100,100))));
+						}
 					}
 					break;
             }
@@ -766,6 +1074,14 @@ int main (int argc, char **argv) {
 		draw();
 
         window.display();
+
+		if (frameClock.getElapsedTime() < MAX_FRAME_TIME) {
+			sf::sleep(MAX_FRAME_TIME - frameClock.getElapsedTime());
+		}
+
+		framerate = 1.f / frameClock.getElapsedTime().asSeconds();
+
+		frameClock.restart();
     }
     return 0;
 }
