@@ -26,7 +26,8 @@ const int MODE_BUILD = 1;
 const int BUILDINGTYPE_NEXUS = 0;
 const int BUILDINGTYPE_NODE = 1;
 const int BUILDINGTYPE_GENERATOR = 2;
-const int BUILDINGTYPE_ENERGYCANNON = 3;
+const int BUILDINGTYPE_MINER = 3;
+const int BUILDINGTYPE_ENERGYCANNON = 4;
 
 const int NEXUS_MAXHEALTH = 2000;
 const int NEXUS_MASSCOST = 100000;
@@ -44,6 +45,9 @@ const int GENERATOR_MASSCOST = 10000;
 const float GENERATOR_BUILD_MASSDRAW = 10;
 const float GENERATOR_BUILD_ENERGYDRAW = 10;
 const float GENERATOR_ENERGY_PROVIDED = 10;
+
+const float MINER_RANGE = 200;
+const float MINER_MINE_RATE = 1;
 
 const int ENERGYCANNON_MAXHEALTH = 800;
 const float ENERGYCANNON_MASSCOST = 4000;
@@ -95,6 +99,55 @@ struct Resources {
 	float energy;
 	Resources(float _mass, float _energy) : mass(_mass), energy(_energy) {}
 };
+
+class MassPile {
+protected:
+	sf::Vector2i gridPoint;
+	bool dead;
+	float mass;
+public:
+	MassPile(sf::Vector2i _gridPoint, float _mass) {
+		gridPoint = _gridPoint;
+		mass = _mass;
+		dead = false;
+	}
+	sf::Vector2f getPos() {
+		return grid.getRealPos(gridPoint) + sf::Vector2f(0.5, 0.5);
+	}
+	float tryDeductMass(float amount) {
+		float deducted;
+		if (mass >= amount) {
+			deducted = amount;
+			mass -= amount;
+		}
+		else {
+			deducted = mass;
+			mass = 0;
+			die();
+		}
+		return deducted;
+	}
+	void go() {
+		
+	}
+	void draw(sf::RenderWindow *window) {
+		sf::Color color(255,255,0);
+		sf::Vertex triangle[] = {
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(-6, 6)), color),
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(0, -6)), color),
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(6, 6)), color)
+		};
+		window->draw(triangle, 3, sf::Triangles);
+	}
+	bool isDead() {
+		return dead;
+	}
+	void die() {
+		dead = true;
+	}
+};
+
+vector<boost::shared_ptr<MassPile>> massPiles;
 
 class Player;
 
@@ -218,7 +271,15 @@ public:
 	}
 	void drawHealthBar(sf::RenderWindow *window) {
 		float healthFraction = health / getMaxHealth();
-		sf::Color color = sf::Color((1-healthFraction)*255, healthFraction*255, 0);
+		sf::Color color;
+		if (healthFraction > 0.7) {
+			float redFraction = 1.f - (healthFraction-0.7)*(1/0.3);
+			color = sf::Color(255*redFraction, 255, 0);
+		}
+		else {
+			float greenFraction = healthFraction*(1/0.7);
+			color = sf::Color(255, 255*greenFraction, 0);
+		}
 		sf::Vertex healthBar[] = {
 			sf::Vertex(toDrawPos(grid.getRealPos(gridPoint) + sf::Vector2f(1, 1)), color),
 			sf::Vertex(toDrawPos(grid.getRealPos(gridPoint) + sf::Vector2f(width*healthFraction*GRID_CELL_WIDTH, 1)), color),
@@ -345,6 +406,85 @@ public:
 	virtual float getEnergyProvided() {return 0;}
 };
 
+class Miner : public Building {
+protected:
+	boost::weak_ptr<MassPile> targetedMassPile;
+	float massHeld;
+public:
+	Miner(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, bool _ghost)
+		: Building(_owner, _gridPoint, 2, _ghost) {
+		massHeld = 0;
+	}
+	int getMaxHealth() {return MINER_MAXHEALTH;}
+	Resources getBuildResourceDraw() {return Resources(MINER_BUILD_MASSDRAW, MINER_BUILD_ENERGYDRAW);}
+	int getBuildMassTarget() {return MINER_MASSCOST;}
+	float getEnergyDraw() {return MINER_ENERGYDRAW but not all the time...;}
+	float supplyEnergy(float supplyRatio) {return 0;}
+	void setTarget(boost::shared_ptr<MassPile> newTarget) {
+		targetedMassPile = newTarget;
+	}
+	boost::shared_ptr<MassPile> getTarget() {
+		return targetedMassPile.lock();
+	}
+	void targetClosestMassPile() {
+		boost::shared_ptr<MassPile> closestPile;
+		float closestPileDistance;
+		for (int i=0; i<massPiles.size(); i++) {
+			float distanceToPile = getMagnitude(getPos() - massPiles[i]->getPos());
+			if (distanceToPile > MINER_RANGE) {
+				continue;
+			}
+
+			if ((!closestPile) || distanceToPile < closestPileDistance) {
+				closestPile = massPiles[i];
+				closestPileDistance = distanceToPile;
+			}
+		}
+		if (closestPile)
+			targetedMassPile = closestPile;
+	}
+	void go() {
+		boost::shared_ptr<MassPile> massPile = targetedMassPile.lock();
+		if (!massPile) {
+			targetClosestMassPile();
+			massPile = targetedMassPile.lock();
+		}
+		if (massPile) {
+			if (massPile->isDead()) {
+				targetedMassPile.reset();
+			}
+			else {
+				massHeld += massPile->tryDeductMass(MINER_MINE_RATE);
+			}
+		}
+	}
+	float withdrawAllMass() {
+		float toReturn = massHeld;
+		massHeld = 0;
+		return toReturn;
+	}
+	void drawDesign(sf::RenderWindow *window) {
+		sf::Color color(255,255,0);
+		sf::Vertex triangle[] = {
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(-6, 6)), color),
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(0, -6)), color),
+			sf::Vertex(toDrawPos(getPos() + sf::Vector2f(6, 6)), color)
+		};
+		window->draw(triangle, 3, sf::LinesStrip);
+	}
+	void drawTargetLine(sf::RenderWindow *window) {
+		boost::shared_ptr<MassPile> massPile = targetedMassPile.lock();
+		if (!massPile)
+			return;
+
+		sf::Vertex line[] = {
+			sf::Vertex(toDrawPos(getPos()), sf::Color(255,0,0)),
+			sf::Vertex(toDrawPos(massPile->getPos()), sf::Color(255,255,0))
+		};
+		window->draw(line, 2, sf::Lines);
+	}
+};
+
 class Generator : public EnergyProviderBaseClass {
 public:
 	Generator(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, bool _ghost)
@@ -390,6 +530,10 @@ public:
 	}
 	virtual void go() {
 		Building::go();
+
+		connectedBuildings.erase(remove_if(connectedBuildings.begin(), connectedBuildings.end(),
+										   [](boost::weak_ptr<Building> b) {return (b.expired() || b.lock()->isDead());}),
+										   connectedBuildings.end());
 	}
 	void drawConnections(sf::RenderWindow *window, sf::Color color) {
 		for (int i=0; i<connectedBuildings.size(); i++) {
@@ -583,11 +727,27 @@ public:
 
 class Nexus : public NodeBaseClass, public EnergyProviderBaseClass {
 	int minerals;
+	float massStored;
 public:
 	Nexus(boost::weak_ptr<Player> _owner, sf::Vector2i _gridPoint, bool _ghost)
 		: NodeBaseClass(_owner, _gridPoint, 3, _ghost),
 		  EnergyProviderBaseClass(_owner, _gridPoint, 3, _ghost),
-		  Building(_owner, _gridPoint, 3, _ghost) {}
+		  Building(_owner, _gridPoint, 3, _ghost) {
+			massStored = 0;
+	}
+	float getMassStored() {
+		return massStored;
+	}
+	void depositMass(float mass) {
+		massStored += mass;
+	}
+	bool withdrawMass(float mass) {
+		if (massStored >= mass) {
+			massStored -= mass;
+			return true;
+		}
+		return false;
+	}
 	int getMaxHealth() {
 		return NEXUS_MAXHEALTH;
 	}
@@ -619,27 +779,104 @@ public:
 class Network {
 	boost::weak_ptr<Player> owner;
 	vector<boost::shared_ptr<Building>> connectedBuildings;
-	boost::shared_ptr<NodeBaseClass> networkCenter;
+	boost::shared_ptr<Nexus> nexus;
 	vector<boost::shared_ptr<NodeBaseClass>> activeNodes;
-	bool connectedToNexus;
 public:
 	float energyAvailable, energyRequested, energySpent, energyProfit;
 	float massAvailable, massRequested, massSpent;
-	Network(boost::weak_ptr<Player> _owner, boost::shared_ptr<NodeBaseClass> _networkCenter) {
+	Network(boost::weak_ptr<Player> _owner, boost::shared_ptr<Nexus> _nexus) {
 		owner = _owner;
-		networkCenter = _networkCenter;
+		nexus = _nexus;
 
-		assert(networkCenter->isActive());
-		activeNodes.push_back(networkCenter);
-		connectedBuildings.push_back(networkCenter);
+		assert(nexus->isActive());
+		activeNodes.push_back(nexus);
+		connectedBuildings.push_back(nexus);
 
-		networkCenter->setDistanceScore(0);
-		if (boost::dynamic_pointer_cast<Nexus, NodeBaseClass>(networkCenter)) {
-			connectedToNexus = true;
-		}
-		else connectedToNexus = false;
+		nexus->setDistanceScore(0);
 
 		energyAvailable = energySpent = massAvailable = massSpent = energyProfit = 0;
+	}
+	void reactToDestroyedNode(boost::shared_ptr<NodeBaseClass> destroyedNode) {
+		vector<boost::shared_ptr<NodeBaseClass>> oldActiveNodes = activeNodes;
+
+		vector<boost::shared_ptr<NodeBaseClass>> newActiveNodes;
+		
+		vector<boost::shared_ptr<NodeBaseClass>> networkEdge;
+		vector<boost::shared_ptr<NodeBaseClass>> previousEdge;
+
+		//Add all nodes closer than or as close to nexus to new lists
+		//Also build networkEdge list
+		for (int i=0; i<oldActiveNodes.size(); i++) {
+			if (oldActiveNodes[i]->getDistanceScore() <= destroyedNode->getDistanceScore()) {
+				newActiveNodes.push_back(oldActiveNodes[i]);
+				if (oldActiveNodes[i]->getDistanceScore() == destroyedNode->getDistanceScore()) {
+					networkEdge.push_back(oldActiveNodes[i]);
+				}
+				else {
+					previousEdge.push_back(oldActiveNodes[i]);
+				}
+				//oldActiveNodes[i].reset();
+			}
+		}
+
+		//iteratively add new nodes to network
+		int nextEdgeScore = destroyedNode->getDistanceScore() + 1;
+		while (networkEdge.size() > 0) {
+			vector<boost::shared_ptr<NodeBaseClass>> nextEdge;
+			for (int i=0; i<networkEdge.size(); i++) {
+				for (int j=0; j<networkEdge[i]->connectedBuildings.size(); j++) {
+					boost::shared_ptr<NodeBaseClass> connectedNode = boost::dynamic_pointer_cast<NodeBaseClass, Building>(networkEdge[i]->connectedBuildings[j].lock());
+
+					//Ignore if not a node or if weak_ptr had expired
+					if (!connectedNode) {
+						continue;
+					}
+					//Ignore if in networkEdge
+					if (find(networkEdge.begin(), networkEdge.end(), connectedNode) != networkEdge.end()) {
+						continue;
+					}
+					//Ignore if in previousEdge
+					if (find(previousEdge.begin(), previousEdge.end(), connectedNode) != previousEdge.end()) {
+						continue;
+					}
+					//Ignore if already added to nextEdge
+					if (find(nextEdge.begin(), nextEdge.end(), connectedNode) != nextEdge.end()) {
+						continue;
+					}
+
+					//connectedNode must now point to a node not yet in our lists
+					connectedNode->setDistanceScore(nextEdgeScore);
+					nextEdge.push_back(connectedNode);
+					newActiveNodes.push_back(connectedNode);
+				}
+			}
+			previousEdge = networkEdge;
+			networkEdge = nextEdge;
+			nextEdgeScore++;
+		}
+
+		vector<boost::shared_ptr<Building>> newConnectedBuildings;
+
+		//Now find all connected buildings
+		for (int i=0; i<newActiveNodes.size(); i++) {
+			newConnectedBuildings.push_back(newActiveNodes[i]);
+			for (int j=0; j<newActiveNodes[i]->connectedBuildings.size(); j++) {
+				boost::shared_ptr<Building> newBuilding = newActiveNodes[i]->connectedBuildings[j].lock();
+				
+				if (!newBuilding)//weak_ptr expired
+					continue;
+				if (boost::dynamic_pointer_cast<NodeBaseClass, Building>(newBuilding))//if it's a node, ignore (we add all nodes one loop out)
+					continue;
+
+				if (find(newConnectedBuildings.begin(), newConnectedBuildings.end(), newBuilding) == newConnectedBuildings.end()) {//if not already in list
+					newConnectedBuildings.push_back(newBuilding);
+				}
+			}
+		}
+
+		//Finally assign new lists to class members
+		connectedBuildings = newConnectedBuildings;
+		activeNodes = newActiveNodes;
 	}
 	void go();
 };
@@ -648,7 +885,7 @@ class Player {
 public:
 	vector<boost::shared_ptr<Building>> ownedBuildings;
 	vector<boost::shared_ptr<Building>> ghostBuildings;
-	vector<boost::shared_ptr<Network>> networks;
+	boost::shared_ptr<Network> network;
 };
 
 vector<boost::shared_ptr<Player>> players;
@@ -666,8 +903,29 @@ void registerNewGhostBuilding(boost::shared_ptr<Player> player, boost::shared_pt
 }
 
 void Network::go() {
+	//React to dead nodes, and delete dead nodes and dead buildings
+	//First log all dead nodes
+	vector<boost::shared_ptr<NodeBaseClass>> deadNodes;
+	for (int i=0; i<activeNodes.size(); i++) {
+		if (activeNodes[i]->isDead()) {
+			deadNodes.push_back(activeNodes[i]);
+		}
+	}
+	//Then delete all dead nodes and buildings from lists
+	activeNodes.erase(remove_if(activeNodes.begin(), activeNodes.end(),
+								[](boost::shared_ptr<NodeBaseClass> n) {return n->isDead(); }),
+								activeNodes.end());
+	connectedBuildings.erase(remove_if(connectedBuildings.begin(), connectedBuildings.end(),
+									   [](boost::shared_ptr<Building> b) {return b->isDead(); }),
+									   connectedBuildings.end());
+	//Now react to dead nodes
+	for (int i=0; i<deadNodes.size(); i++) {
+		reactToDestroyedNode(deadNodes[i]);
+	}
+
 	boost::shared_ptr<Player> networkOwner = owner.lock();
 
+	//How much energy is available?
 	float energyIncome = 0;
 	for (int i=0; i<connectedBuildings.size(); i++) {
 		if (boost::shared_ptr<EnergyProviderBaseClass> eProv = boost::dynamic_pointer_cast<EnergyProviderBaseClass, Building>(connectedBuildings[i])) {
@@ -680,9 +938,17 @@ void Network::go() {
 	float energyAvailableFromStorage = 0;//determine energy available from batteries
 		
 	energyAvailable = energyIncome + energyAvailableFromStorage;
-	massAvailable = 100;
 
-	bool networkCanBuild = (connectedToNexus && massAvailable > 0);
+	//Get new mass from any miners and transfer to Nexus
+	for (int i=0; i<connectedBuildings.size(); i++) {
+		if (boost::shared_ptr<Miner> miner = boost::dynamic_pointer_cast<Miner, Building>(connectedBuildings[i])) {
+			nexus->depositMass(miner->withdrawAllMass());
+		}
+	}
+
+	massAvailable = nexus->getMassStored();
+
+	bool networkCanBuild = (massAvailable > 0);
 
 	//Unghost any buildings attached to active nodes.
 	for (int i=0; i<activeNodes.size(); i++) {
@@ -791,6 +1057,8 @@ void Network::go() {
 		}
 	}
 
+	assert(nexus->withdrawMass(massSpent));
+
 	energyProfit = energyIncome - energySpent;
 	//store or remove from storage
 }
@@ -818,14 +1086,19 @@ void start() {
 
 	boost::shared_ptr<Nexus> nexus = boost::shared_ptr<Nexus>(new Nexus(players[0], sf::Vector2i(15,15), false));
 	nexus->magicallyComplete();
+	nexus->depositMass(3000);
 
 	buildings.push_back(nexus);
 	selectedPlayer->ownedBuildings.push_back(nexus);
 
-	players[0]->networks.push_back(boost::shared_ptr<Network>(new Network(players[0], nexus)));
+	players[0]->network = boost::shared_ptr<Network>(new Network(players[0], nexus));
 
 	mode = MODE_NULL;
 	buildType = BUILDINGTYPE_NEXUS;
+
+	for (int i=0; i<20; i++) {
+		massPiles.push_back(boost::shared_ptr<MassPile>(new MassPile(sf::Vector2i(rand()%100, rand()%100), 1000)));
+	}
 }
 
 void changeMode(int newMode) {
@@ -849,6 +1122,9 @@ void changeBuildType(int newBuildType) {
 	else if (newBuildType == BUILDINGTYPE_GENERATOR) {
 		cursorBuilding = boost::shared_ptr<Generator>(new Generator(boost::shared_ptr<Player>(), cursorBuilding->getGridPoint(), true));
 	}
+	else if (newBuildType == BUILDINGTYPE_MINER) {
+		cursorBuilding = boost::shared_ptr<Miner>(new Miner(boost::shared_ptr<Player>(), cursorBuilding->getGridPoint(), true));
+	}
 	else if (newBuildType == BUILDINGTYPE_ENERGYCANNON) {
 		cursorBuilding = boost::shared_ptr<EnergyCannon>(new EnergyCannon(boost::shared_ptr<Player>(), cursorBuilding->getGridPoint(), true));
 	}
@@ -867,6 +1143,9 @@ void createNewCursorBuilding() {
 	}
 	else if (buildType == BUILDINGTYPE_GENERATOR) {
 		cursorBuilding = boost::shared_ptr<Generator>(new Generator(boost::shared_ptr<Player>(), sf::Vector2i(0,0), true));
+	}
+	else if (buildType == BUILDINGTYPE_MINER) {
+		cursorBuilding = boost::shared_ptr<Miner>(new Miner(boost::shared_ptr<Player>(), sf::Vector2i(0,0), true));
 	}
 	else if (buildType == BUILDINGTYPE_ENERGYCANNON) {
 		cursorBuilding = boost::shared_ptr<EnergyCannon>(new EnergyCannon(boost::shared_ptr<Player>(), sf::Vector2i(0,0), true));
@@ -889,13 +1168,16 @@ void go() {
 		buildings[i]->go();
 	}
 	for (int i=0; i<players.size(); i++) {
-		for (int j=0; j<players[i]->networks.size(); j++) {
-			players[i]->networks[j]->go();
-		}
+		if (players[i]->network)
+			players[i]->network->go();
 	}
 
 	for (int i=0; i<mobs.size(); i++) {
 		mobs[i]->go();
+	}
+
+	for (int i=0; i<massPiles.size(); i++) {
+		massPiles[i]->go();
 	}
 
 	//remove anything that's dead
@@ -910,6 +1192,9 @@ void go() {
 	mobs.erase(remove_if(mobs.begin(), mobs.end(),
 			   [](boost::shared_ptr<Mob> m) {return m->isDead(); }),
 			   mobs.end());
+	massPiles.erase(remove_if(massPiles.begin(), massPiles.end(),
+					[](boost::shared_ptr<MassPile> m) {return m->isDead(); }),
+					massPiles.end());
 	frameNum++;
 }
 
@@ -921,6 +1206,9 @@ void draw() {
 		if (boost::shared_ptr<NodeBaseClass> node = boost::dynamic_pointer_cast<NodeBaseClass, Building>(buildings[i])) {
 			node->drawConnections(&window, sf::Color(100, 100, 255));
 		}
+		if (boost::shared_ptr<Miner> miner = boost::dynamic_pointer_cast<Miner, Building>(buildings[i])) {
+			miner->drawTargetLine(&window);
+		}
 	}
 	for (int i=0; i<buildings.size(); i++) {
 		buildings[i]->draw(&window);
@@ -930,6 +1218,9 @@ void draw() {
 	}
 	for (int i=0; i<mobs.size(); i++) {
 		mobs[i]->draw(&window);
+	}
+	for (int i=0; i<massPiles.size(); i++) {
+		massPiles[i]->draw(&window);
 	}
 
 	if (mode == MODE_BUILD) {
@@ -949,15 +1240,15 @@ void draw() {
 	else
 		s << "frame " << ceil(framerate) << endl << endl;
 
-	for (int i=0; i<selectedPlayer->networks.size(); i++) {
-		s << "Network " << i << ":" << endl << endl;
+	if (selectedPlayer->network) {
+		s << "Network:" << endl << endl;
 
-		s << "Energy available: " << selectedPlayer->networks[i]->energyAvailable << endl;
-		s << "Energy requested: " << selectedPlayer->networks[i]->energyRequested << endl;
-		s << "Energy profit: " << selectedPlayer->networks[i]->energyProfit << endl;
+		s << "Energy available: " << selectedPlayer->network->energyAvailable << endl;
+		s << "Energy requested: " << selectedPlayer->network->energyRequested << endl;
+		s << "Energy profit: " << selectedPlayer->network->energyProfit << endl;
 
-		s << "Mass available: " << selectedPlayer->networks[i]->massAvailable << endl;
-		s << "Mass requested: " << selectedPlayer->networks[i]->massRequested << endl;
+		s << "Mass available: " << selectedPlayer->network->massAvailable << endl;
+		s << "Mass spent: " << selectedPlayer->network->massSpent << endl;
 
 		s << endl << endl;
 	}
@@ -1019,6 +1310,10 @@ int main (int argc, char **argv) {
 							changeMode(MODE_BUILD);
 							changeBuildType(BUILDINGTYPE_GENERATOR);
 						}
+						else if (e.key.code == sf::Keyboard::E) {
+							changeMode(MODE_BUILD);
+							changeBuildType(BUILDINGTYPE_MINER);
+						}
 						else if (e.key.code == sf::Keyboard::R) {
 							changeMode(MODE_BUILD);
 							changeBuildType(BUILDINGTYPE_ENERGYCANNON);
@@ -1050,7 +1345,7 @@ int main (int argc, char **argv) {
 									buildings.push_back(newNexus);
 									selectedPlayer->ownedBuildings.push_back(newNexus);
 
-									selectedPlayer->networks.push_back(boost::shared_ptr<Network>(new Network(selectedPlayer, newNexus)));
+									selectedPlayer->network = boost::shared_ptr<Network>(new Network(selectedPlayer, newNexus));
 								}
 							}
 							selectedPlayer->ghostBuildings.push_back(cursorBuilding);
@@ -1060,7 +1355,7 @@ int main (int argc, char **argv) {
 						else if (e.mouseButton.button == sf::Mouse::Middle) {
 							sf::Vector2f pos(e.mouseButton.x, e.mouseButton.y);
 
-							//mobs.push_back(boost::shared_ptr<EnergyBullet>(new EnergyBullet(bulletPos, players[0], sf::Vector2f(100,100))));
+							mobs.push_back(boost::shared_ptr<EnergyBullet>(new EnergyBullet(pos, selectedPlayer, sf::Vector2f(100,100))));
 						}
 					}
 					break;
